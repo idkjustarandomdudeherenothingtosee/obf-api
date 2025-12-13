@@ -23,6 +23,17 @@ function initLua() {
     if not unpack then unpack = table.unpack end
     if not loadstring then loadstring = load end
 
+    if not newproxy then
+    function newproxy(with_meta)
+        local obj = {}
+        if with_meta then
+            return setmetatable(obj, {})
+        end
+        return obj
+    end
+end
+
+
     do
     local old_random = math.random
     local max = 2147483647
