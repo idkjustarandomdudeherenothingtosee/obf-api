@@ -1,53 +1,138 @@
 const fengari = require("fengari")
-const { lua, lauxlib, lualib, to_luastring, to_jsstring } = fengari
+const lua = fengari.lua
+const lauxlib = fengari.lauxlib
+const lualib = fengari.lualib
+const { to_luastring, to_jsstring } = fengari
+
+const LUA_MODULES = require("./lua-bundle")
 
 let L
 let ready = false
 
-module.exports = function handler(req, res) {
-  try {
-    if (!ready) {
-      L = lauxlib.luaL_newstate()
-      lualib.luaL_openlibs(L)
+function initLua() {
+  if (ready) return
 
-      // preload ONE lua module
-      const preloadModule = `
-        package.preload["testmod"] = function()
-          return {
-            add = function(a, b)
-              return a + b
-            end
-          }
-        end
-      `
-      lauxlib.luaL_dostring(L, to_luastring(preloadModule))
+  L = lauxlib.luaL_newstate()
+  lualib.luaL_openlibs(L)
 
-      ready = true
-    }
+  // basic polyfills expected by prometheus
+  const preload = `
+    arg = arg or {}
+    package.preload = package.preload or {}
 
-    const status = lauxlib.luaL_dostring(
-      L,
-      to_luastring(`
-        local m = require("testmod")
-        return m.add(5, 7)
-      `)
-    )
+    if not unpack then unpack = table.unpack end
+    if not loadstring then loadstring = load end
+  `
+  lauxlib.luaL_dostring(L, to_luastring(preload))
 
+  // inject all prometheus lua modules
+  for (const name in LUA_MODULES) {
+    const code = LUA_MODULES[name]
+
+    const wrapped = `
+      package.preload["${name}"] = function()
+        ${code}
+      end
+    `
+
+    const status = lauxlib.luaL_dostring(L, to_luastring(wrapped))
     if (status !== 0) {
       const err = to_jsstring(lua.lua_tostring(L, -1))
       lua.lua_pop(L, 1)
-      throw new Error(err)
+      throw new Error("failed loading module " + name + ": " + err)
+    }
+  }
+
+  ready = true
+}
+
+function toLuaTable(obj) {
+  if (Array.isArray(obj)) {
+    return `{${obj.map(toLuaTable).join(",")}}`
+  }
+  if (obj && typeof obj === "object") {
+    return `{${Object.entries(obj)
+      .map(([k, v]) => `["${k}"]=${toLuaTable(v)}`)
+      .join(",")}}`
+  }
+  if (typeof obj === "string") {
+    return `"${obj
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, "\\n")
+      .replace(/\r/g, "\\r")
+      .replace(/\t/g, "\\t")}"`
+  }
+  if (typeof obj === "number") return String(obj)
+  if (typeof obj === "boolean") return obj ? "true" : "false"
+  return "nil"
+}
+
+function obfuscate(code) {
+  const escaped = code
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t")
+
+  const script = `
+    local Pipeline = require("prometheus.pipeline")
+    local logger = require("logger")
+    logger.logLevel = 0
+
+    local config = {
+      LuaVersion = "LuaU",
+      PrettyPrint = false,
+      VarNamePrefix = "",
+      NameGenerator = "MangledShuffled",
+      InjectRuntimeModules = true,
+      Seed = math.random(1, 1000000),
+      Steps = {}
     }
 
-    const result = lua.lua_tonumber(L, -1)
-    lua.lua_pop(L, 1)
+    local pipeline = Pipeline:fromConfig(config)
+    return pipeline:apply("${escaped}", "input.lua")
+  `
 
-    res.json({
-      ok: true,
-      moduleResult: result
+  const status = lauxlib.luaL_dostring(L, to_luastring(script))
+  if (status !== 0) {
+    const err = to_jsstring(lua.lua_tostring(L, -1))
+    lua.lua_pop(L, 1)
+    throw new Error(err)
+  }
+
+  const result = to_jsstring(lua.lua_tostring(L, -1))
+  lua.lua_pop(L, 1)
+  return result
+}
+
+module.exports = async function handler(req, res) {
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "method not allowed" })
+    return
+  }
+
+  try {
+    initLua()
+
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body) : req.body
+
+    if (!body || typeof body.code !== "string") {
+      res.status(400).json({ error: "missing code" })
+      return
+    }
+
+    const output = obfuscate(body.code)
+
+    res.status(200).json({
+      success: true,
+      output
     })
   } catch (e) {
     res.status(500).json({
+      success: false,
       error: String(e.message || e)
     })
   }
