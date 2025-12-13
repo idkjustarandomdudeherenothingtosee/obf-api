@@ -88,7 +88,14 @@ function obfuscate(code) {
       NameGenerator = "MangledShuffled",
       InjectRuntimeModules = true,
       Seed = math.random(1, 1000000),
-      Steps = {}
+      Steps: [
+            { Name: "EncryptStrings", Settings: {} },
+            { Name: "AntiTamper", Settings: { UseDebug: false } },
+            { Name: "Vmify", Settings: {} },
+            { Name: "ConstantArray", Settings: { Treshold: 1, StringsOnly: true, Shuffle: true, Rotate: true, LocalWrapperTreshold: 0 } },
+            { Name: "NumbersToExpressions", Settings: {} },
+            { Name: "WrapInFunction", Settings: {} }
+        ]
     }
 
     local pipeline = Pipeline:fromConfig(config)
