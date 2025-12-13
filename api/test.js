@@ -9,12 +9,28 @@ module.exports = function handler(req, res) {
     if (!ready) {
       L = lauxlib.luaL_newstate()
       lualib.luaL_openlibs(L)
+
+      // preload ONE lua module
+      const preloadModule = `
+        package.preload["testmod"] = function()
+          return {
+            add = function(a, b)
+              return a + b
+            end
+          }
+        end
+      `
+      lauxlib.luaL_dostring(L, to_luastring(preloadModule))
+
       ready = true
     }
 
     const status = lauxlib.luaL_dostring(
       L,
-      to_luastring("return 2 + 2")
+      to_luastring(`
+        local m = require("testmod")
+        return m.add(5, 7)
+      `)
     )
 
     if (status !== 0) {
@@ -28,7 +44,7 @@ module.exports = function handler(req, res) {
 
     res.json({
       ok: true,
-      luaResult: result
+      moduleResult: result
     })
   } catch (e) {
     res.status(500).json({
