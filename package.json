@@ -1,0 +1,10 @@
+{
+  "name": "your-project",
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "fengari": "^0.1.4"
+  }
+}
