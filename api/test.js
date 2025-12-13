@@ -22,6 +22,34 @@ function initLua() {
 
     if not unpack then unpack = table.unpack end
     if not loadstring then loadstring = load end
+
+    do
+    local old_random = math.random
+    local max = 2147483647
+
+    math.random = function(a, b)
+        if a == nil then
+            return old_random()
+        end
+
+        if b == nil then
+            return old_random(1, a)
+        end
+
+        if a > b then
+            a, b = b, a
+        end
+
+        a = math.floor(a)
+        b = math.floor(b)
+
+        if a < -max then a = -max end
+        if b > max then b = max end
+
+        return old_random(a, b)
+    end
+end
+
   `
   lauxlib.luaL_dostring(L, to_luastring(preload))
 
