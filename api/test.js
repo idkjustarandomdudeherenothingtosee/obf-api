@@ -1,21 +1,38 @@
-import fengari from "fengari"
+const fengari = require("fengari")
+const { lua, lauxlib, lualib, to_luastring, to_jsstring } = fengari
 
-const { lauxlib, lualib, to_luastring } = fengari
-
-let luaReady = false
 let L
+let ready = false
 
-export default function handler(req, res) {
+module.exports = function handler(req, res) {
   try {
-    if (!luaReady) {
+    if (!ready) {
       L = lauxlib.luaL_newstate()
       lualib.luaL_openlibs(L)
-      lauxlib.luaL_dostring(L, to_luastring("x = 1 + 2"))
-      luaReady = true
+      ready = true
     }
 
-    res.json({ ok: true, fengari: true })
+    const status = lauxlib.luaL_dostring(
+      L,
+      to_luastring("return 2 + 2")
+    )
+
+    if (status !== 0) {
+      const err = to_jsstring(lua.lua_tostring(L, -1))
+      lua.lua_pop(L, 1)
+      throw new Error(err)
+    }
+
+    const result = lua.lua_tonumber(L, -1)
+    lua.lua_pop(L, 1)
+
+    res.json({
+      ok: true,
+      luaResult: result
+    })
   } catch (e) {
-    res.status(500).json({ error: String(e) })
+    res.status(500).json({
+      error: String(e.message || e)
+    })
   }
 }
