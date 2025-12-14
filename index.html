@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>One Line Escaper</title>
+  <style>
+    body {
+      background: #0f0f0f;
+      color: #eaeaea;
+      font-family: monospace;
+      margin: 0;
+      padding: 20px;
+    }
+    textarea {
+      width: 100%;
+      height: 35vh;
+      background: #141414;
+      color: #eaeaea;
+      border: 1px solid #333;
+      padding: 10px;
+      box-sizing: border-box;
+      resize: vertical;
+    }
+    button {
+      width: 100%;
+      padding: 12px;
+      margin: 10px 0;
+      background: #1f1f1f;
+      color: #fff;
+      border: 1px solid #444;
+      cursor: pointer;
+      font-family: monospace;
+    }
+    button:hover {
+      background: #2a2a2a;
+    }
+  </style>
+</head>
+<body>
+
+<textarea id="input" placeholder="paste code here"></textarea>
+
+<button onclick="convert()">convert to one line</button>
+<button onclick="copy()">copy output</button>
+
+<textarea id="output" placeholder="escaped one-line output"></textarea>
+
+<script>
+  function convert() {
+    const src = document.getElementById("input").value
+
+    const out =
+      '"' +
+      src
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"')
+        .replace(/\r?\n/g, "\\n")
+        .replace(/\t/g, "\\t")
+        .replace(/<\/script>/gi, "<\\/script>") +
+      '"'
+
+    document.getElementById("output").value = out
+  }
+
+  function copy() {
+    const out = document.getElementById("output")
+    out.focus()
+    out.select()
+    document.execCommand("copy")
+  }
+</script>
+
+</body>
+</html>
