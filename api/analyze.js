@@ -1,131 +1,157 @@
-export default function handler(req, res) {
+export const config = {
+  api: {
+    bodyParser: false
+  }
+}
+
+export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "method not allowed" })
+    return res.status(405).end("method not allowed")
   }
 
-  let code = req.body?.code
-  if (typeof code !== "string") {
-    return res.status(400).json({ error: "code must be string" })
-  }
+  let raw = ""
+  for await (const chunk of req) raw += chunk
+  let code = raw.toString()
+  if (!code.trim()) return res.status(400).end("empty body")
 
+  let fixmode = req.query.fix === "true"
   let lines = code.split("\n")
 
-  let stack = []
+  let blocks = []
+  let loops = []
+  let functions = []
+  let diagnostics = []
+  let unreachable = new Set()
+
   let depth = 0
   let maxdepth = 0
+  let complexity = 1
+  let lastreturn = false
 
-  let loopdepth = 0
-  let maxloopdepth = 0
-
-  let warnings = []
-  let risks = []
-
-  let hasyield = false
-  let insidewhile = false
-  let whilelines = []
-
-  let tokens = {
-    do: 0,
-    end: 0,
-    function: 0,
-    while: 0,
-    repeat: 0,
-    until: 0
+  function diag(line, severity, msg) {
+    diagnostics.push({ line, severity, msg })
   }
 
   for (let i = 0; i < lines.length; i++) {
     let line = lines[i].trim()
+    let ln = i + 1
 
-    if (line === "" || line.startsWith("--")) continue
-
-    if (/\b(task\.wait|task\.spawn|task\.delay|wait)\b/.test(line)) {
-      hasyield = true
+    if (lastreturn && line && !line.startsWith("end")) {
+      unreachable.add(ln)
     }
+    lastreturn = false
+
+    if (!line || line.startsWith("--")) continue
+
+    if (/\breturn\b/.test(line)) lastreturn = true
 
     if (/\bfunction\b/.test(line)) {
-      tokens.function++
       depth++
-      stack.push("function")
+      maxdepth = Math.max(maxdepth, depth)
+      complexity++
+      functions.push({ line: ln, recursive: false })
+      blocks.push("function")
     }
 
-    if (/\b(do|then|repeat)\b/.test(line)) {
+    if (/\bwhile\b|\brepeat\b/.test(line)) {
       depth++
-      stack.push("block")
+      maxdepth = Math.max(maxdepth, depth)
+      complexity++
+      loops.push({
+        line: ln,
+        infinite: /while\s+true\s+do/.test(line),
+        yield: false
+      })
+      blocks.push("loop")
     }
 
-    if (/\bwhile\b/.test(line)) {
-      tokens.while++
-      loopdepth++
-      maxloopdepth = Math.max(maxloopdepth, loopdepth)
-      insidewhile = true
-      whilelines = []
+    if (/\b(task\.wait|task\.spawn|task\.delay|wait)\b/.test(line)) {
+      let l = loops[loops.length - 1]
+      if (l) l.yield = true
     }
 
-    if (insidewhile) {
-      whilelines.push(line)
-    }
-
-    if (/\b(end|until)\b/.test(line)) {
-      tokens.end++
+    if (/\bend\b|\buntil\b/.test(line)) {
+      if (!blocks.pop()) diag(ln, 1, "unbalanced end")
       depth = Math.max(0, depth - 1)
-
-      let last = stack.pop()
-      if (last === "function" && loopdepth > 0) {
-        warnings.push("function defined inside loop")
-      }
-
-      if (insidewhile && loopdepth > 0) {
-        let joined = whilelines.join(" ")
-        if (!/\b(task\.wait|task\.spawn|task\.delay|wait)\b/.test(joined)) {
-          risks.push("while loop without yield detected")
-        }
-        insidewhile = false
-        loopdepth--
-      }
-    }
-
-    if (depth > maxdepth) maxdepth = depth
-
-    if (/while\s+true\s+do/.test(line)) {
-      risks.push("while true loop detected")
     }
   }
 
-  if (depth !== 0 || stack.length !== 0) {
-    risks.push("unbalanced blocks (missing end)")
+  while (blocks.length) {
+    lines.push("end")
+    blocks.pop()
   }
 
-  if (maxloopdepth >= 2) {
-    warnings.push("nested loops detected")
+  let infiniteanalysis = []
+  for (let l of loops) {
+    let confidence = 0
+    if (l.infinite) confidence += 50
+    if (!l.yield) confidence += 40
+    confidence = Math.min(100, confidence)
+    infiniteanalysis.push({ line: l.line, confidence })
+    if (confidence >= 70) {
+      diag(l.line, 1, "high probability infinite loop")
+    }
   }
 
-  if (maxdepth >= 6) {
-    warnings.push("deep nesting may impact performance")
+  let riskscore =
+    infiniteanalysis.filter(l => l.confidence >= 70).length * 30 +
+    unreachable.size * 10 +
+    (maxdepth >= 7 ? 15 : 0) +
+    (complexity >= 15 ? 15 : 0)
+
+  riskscore = Math.min(100, riskscore)
+
+  let verdict = "safe"
+  if (riskscore >= 65) verdict = "unsafe"
+  else if (riskscore >= 30) verdict = "caution"
+
+  if (!fixmode) {
+    return res.status(200).json({
+      ok: true,
+      verdict,
+      metrics: {
+        lines: lines.length,
+        loops: loops.length,
+        functions: functions.length,
+        complexity,
+        maxdepth,
+        riskscore
+      },
+      infiniteanalysis,
+      unreachable: [...unreachable],
+      diagnostics
+    })
   }
 
-  if (tokens.while > 0 && !hasyield) {
-    risks.push("loops exist but no yield found")
+  let fixed = lines.slice()
+
+  for (let l of infiniteanalysis) {
+    if (l.confidence >= 70) {
+      fixed.splice(l.line, 0, "task.wait()")
+    }
   }
 
-  if (tokens.while >= 5) {
-    warnings.push("many while loops detected")
+  for (let u of unreachable) {
+    fixed[u - 1] = "-- unreachable: " + fixed[u - 1]
   }
 
-  let crashlikelihood = "low"
-  if (risks.length >= 3) crashlikelihood = "high"
-  else if (risks.length >= 1) crashlikelihood = "medium"
+  let header = [
+    "--[[",
+    "static analysis report",
+    "",
+    "verdict: " + verdict,
+    "risk score: " + riskscore,
+    "complexity: " + complexity,
+    "max depth: " + maxdepth,
+    "",
+    "diagnostics:"
+  ]
 
-  res.status(200).json({
-    ok: true,
-    metrics: {
-      lines: lines.length,
-      functions: tokens.function,
-      loops: tokens.while,
-      maxdepth,
-      maxloopdepth
-    },
-    risks,
-    warnings,
-    crashlikelihood
-  })
+  for (let d of diagnostics) {
+    header.push(`line ${d.line}: ${d.msg}`)
+  }
+
+  header.push("", "auto fixes applied:", "- injected yields", "- commented unreachable code", "- balanced blocks", "--]]", "")
+
+  res.status(200).end(header.join("\n") + fixed.join("\n"))
 }
