@@ -15,143 +15,147 @@ export default async function handler(req, res) {
   if (!code.trim()) return res.status(400).end("empty body")
 
   let fixmode = req.query.fix === "true"
+  let rcmode = req.query.rc === "true"
+
   let lines = code.split("\n")
 
-  let blocks = []
-  let loops = []
-  let functions = []
+  let globalscope = new Map()
+  let functionlocals = []
+  let localusage = new Map()
+  let hoisted = new Set()
+  let removals = new Set()
   let diagnostics = []
-  let unreachable = new Set()
 
-  let depth = 0
-  let maxdepth = 0
-  let complexity = 1
-  let lastreturn = false
-
-  function diag(line, severity, msg) {
-    diagnostics.push({ line, severity, msg })
+  function markuse(name) {
+    localusage.set(name, (localusage.get(name) || 0) + 1)
   }
 
-  for (let i = 0; i < lines.length; i++) {
-    let line = lines[i].trim()
-    let ln = i + 1
+  function diag(msg) {
+    diagnostics.push(msg)
+  }
 
-    if (lastreturn && line && !line.startsWith("end")) {
-      unreachable.add(ln)
-    }
-    lastreturn = false
+  let currentfn = null
+
+  for (let i = 0; i < lines.length; i++) {
+    let rawline = lines[i]
+    let line = rawline.trim()
 
     if (!line || line.startsWith("--")) continue
 
-    if (/\breturn\b/.test(line)) lastreturn = true
-
-    if (/\bfunction\b/.test(line)) {
-      depth++
-      maxdepth = Math.max(maxdepth, depth)
-      complexity++
-      functions.push({ line: ln, recursive: false })
-      blocks.push("function")
+    if (/^function\b|=\s*function\b/.test(line)) {
+      currentfn = { locals: new Set(), line: i + 1 }
+      functionlocals.push(currentfn)
     }
 
-    if (/\bwhile\b|\brepeat\b/.test(line)) {
-      depth++
-      maxdepth = Math.max(maxdepth, depth)
-      complexity++
-      loops.push({
-        line: ln,
-        infinite: /while\s+true\s+do/.test(line),
-        yield: false
-      })
-      blocks.push("loop")
+    if (/^end\b/.test(line)) {
+      currentfn = null
     }
 
-    if (/\b(task\.wait|task\.spawn|task\.delay|wait)\b/.test(line)) {
-      let l = loops[loops.length - 1]
-      if (l) l.yield = true
+    let localmatch = line.match(/^local\s+([a-zA-Z_][a-zA-Z0-9_]*)/)
+    if (localmatch) {
+      let name = localmatch[1]
+
+      if (currentfn) {
+        currentfn.locals.add(name)
+      } else {
+        if (globalscope.has(name)) {
+          diag(`duplicate local ${name} removed`)
+          removals.add(i)
+        } else {
+          globalscope.set(name, i)
+        }
+      }
+      localusage.set(name, 0)
+      continue
     }
 
-    if (/\bend\b|\buntil\b/.test(line)) {
-      if (!blocks.pop()) diag(ln, 1, "unbalanced end")
-      depth = Math.max(0, depth - 1)
+    let assign = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=/)
+    if (assign) {
+      let name = assign[1]
+      if (globalscope.has(name) && currentfn) {
+        hoisted.add(name)
+      }
+      markuse(name)
     }
-  }
 
-  while (blocks.length) {
-    lines.push("end")
-    blocks.pop()
-  }
+    let reads = line.matchAll(/\b([a-zA-Z_][a-zA-Z0-9_]*)\b/g)
+    for (let r of reads) markuse(r[1])
 
-  let infiniteanalysis = []
-  for (let l of loops) {
-    let confidence = 0
-    if (l.infinite) confidence += 50
-    if (!l.yield) confidence += 40
-    confidence = Math.min(100, confidence)
-    infiniteanalysis.push({ line: l.line, confidence })
-    if (confidence >= 70) {
-      diag(l.line, 1, "high probability infinite loop")
+    if (/:Get(Children|Descendants|Players)\(\)/.test(line)) {
+      diag("large table detected, converting to lazy cache")
     }
   }
 
-  let riskscore =
-    infiniteanalysis.filter(l => l.confidence >= 70).length * 30 +
-    unreachable.size * 10 +
-    (maxdepth >= 7 ? 15 : 0) +
-    (complexity >= 15 ? 15 : 0)
+  for (let [name, count] of localusage.entries()) {
+    if (count === 0 && globalscope.has(name)) {
+      removals.add(globalscope.get(name))
+      diag(`unused local ${name} removed`)
+    }
+  }
 
-  riskscore = Math.min(100, riskscore)
+  let output = []
 
-  let verdict = "safe"
-  if (riskscore >= 65) verdict = "unsafe"
-  else if (riskscore >= 30) verdict = "caution"
+  let hoistheader = []
+  for (let name of hoisted) {
+    hoistheader.push(`local ${name}`)
+    diag(`hoisted shared local ${name}`)
+  }
 
-  if (!fixmode) {
+  if (hoistheader.length) {
+    output.push(...hoistheader, "")
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    if (removals.has(i)) continue
+
+    let line = lines[i]
+
+    if (rcmode) {
+      if (line.trim().startsWith("--")) continue
+      line = line.replace(/--.*$/g, "")
+    }
+
+    if (/:Get(Children|Descendants|Players)\(\)/.test(line)) {
+      let varname = `__cache_${i}`
+      output.push(
+        `local ${varname} = setmetatable({}, { __mode = "k" })`,
+        `for _,v in ipairs(${line.trim()}) do ${varname}[v] = true end`
+      )
+      continue
+    }
+
+    output.push(line)
+  }
+
+  if (!fixmode && !rcmode) {
     return res.status(200).json({
       ok: true,
-      verdict,
-      metrics: {
-        lines: lines.length,
-        loops: loops.length,
-        functions: functions.length,
-        complexity,
-        maxdepth,
-        riskscore
-      },
-      infiniteanalysis,
-      unreachable: [...unreachable],
       diagnostics
     })
   }
 
-  let fixed = lines.slice()
-
-  for (let l of infiniteanalysis) {
-    if (l.confidence >= 70) {
-      fixed.splice(l.line, 0, "task.wait()")
-    }
-  }
-
-  for (let u of unreachable) {
-    fixed[u - 1] = "-- unreachable: " + fixed[u - 1]
-  }
-
-  let header = [
+  let analysisheader = [
     "--[[",
-    "static analysis report",
+    "analysis",
     "",
-    "verdict: " + verdict,
-    "risk score: " + riskscore,
-    "complexity: " + complexity,
-    "max depth: " + maxdepth,
-    "",
-    "diagnostics:"
+    ...diagnostics,
+    "--]]",
+    ""
   ]
 
-  for (let d of diagnostics) {
-    header.push(`line ${d.line}: ${d.msg}`)
-  }
+  let rcheader = [
+    "--[[",
+    "rc",
+    "comments removed: " + rcmode,
+    "optimizer enabled: true",
+    "--]]",
+    ""
+  ]
 
-  header.push("", "auto fixes applied:", "- injected yields", "- commented unreachable code", "- balanced blocks", "--]]", "")
+  let finalcode = []
+  if (fixmode) finalcode.push(...analysisheader)
+  if (rcmode) finalcode.push(...rcheader)
+  finalcode.push(...output)
 
-  res.status(200).end(header.join("\n") + fixed.join("\n"))
+  res.status(200).end(finalcode.join("\n"))
 }
